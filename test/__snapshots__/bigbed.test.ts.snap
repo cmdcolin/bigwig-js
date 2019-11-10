@@ -13,7 +13,7 @@ Array [
     "strand": -1,
     "thickEnd": 54028,
     "thickStart": 54028,
-    "uniqueId": "bb-277248",
+    "uniqueId": "bb-0-0",
   },
   Object {
     "chrom": "chr7",
@@ -26,7 +26,7 @@ Array [
     "strand": -1,
     "thickEnd": 60328,
     "thickStart": 60328,
-    "uniqueId": "bb-277306",
+    "uniqueId": "bb-0-1",
   },
   Object {
     "chrom": "chr7",
@@ -39,7 +39,7 @@ Array [
     "strand": -1,
     "thickEnd": 63366,
     "thickStart": 62967,
-    "uniqueId": "bb-277361",
+    "uniqueId": "bb-0-2",
   },
   Object {
     "chrom": "chr7",
@@ -52,7 +52,7 @@ Array [
     "strand": -1,
     "thickEnd": 64068,
     "thickStart": 64068,
-    "uniqueId": "bb-277419",
+    "uniqueId": "bb-0-3",
   },
   Object {
     "chrom": "chr7",
@@ -65,7 +65,7 @@ Array [
     "strand": -1,
     "thickEnd": 65159,
     "thickStart": 65159,
-    "uniqueId": "bb-277477",
+    "uniqueId": "bb-0-4",
   },
 ]
 `;
@@ -78,7 +78,7 @@ Array [
     "field": 3,
     "rest": "EDEN.1	1000	+	1200	7608	0,0,0	4	451,903,501,2001	0,1950,3950,5950	EDEN	EDEN	-	-	-",
     "start": 1049,
-    "uniqueId": "bb-358912",
+    "uniqueId": "bb-0-0",
   },
 ]
 `;
@@ -91,7 +91,7 @@ Array [
     "field": 13,
     "rest": "ENST00000406915.3	1000	-	50551247	50556405	0,0,0	3	291,109,48	0,5185,11746	ENSG00000217442.3	SYCE3	protein_coding	protein_coding	basic,appris_principal,exp_conf,CCDS",
     "start": 50551111,
-    "uniqueId": "bb-49149691",
+    "uniqueId": "bb-0-221",
   },
   Object {
     "chromId": 0,
@@ -99,7 +99,7 @@ Array [
     "field": 13,
     "rest": "ENST00000402753.1	1000	-	50551247	50556405	0,0,0	2	206,136	0,5100	ENSG00000217442.3	SYCE3	protein_coding	protein_coding	basic,appris_principal,CCDS",
     "start": 50551196,
-    "uniqueId": "bb-49149869",
+    "uniqueId": "bb-0-222",
   },
 ]
 `;
@@ -112,7 +112,7 @@ Array [
     "field": 3,
     "rest": "ENST00000467796.2	1000	+	0	0	0,0,0	3	41,121,651	0,1919,15401	ENSG00000184319.12	RPL23AP82	processed_transcript	transcribed_unprocessed_pseudogene	-",
     "start": 50783253,
-    "uniqueId": "bb-49157973",
+    "uniqueId": "bb-0-291",
   },
 ]
 `;

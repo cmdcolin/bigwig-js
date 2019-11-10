@@ -1,19 +1,21 @@
 import { Parser } from '@gmod/binary-parser'
 import { Observable, Observer, merge } from 'rxjs'
 import { map, reduce } from 'rxjs/operators'
+import { AbortAwareCache } from './util'
 
-import { BBI, Feature } from './bbi'
-import { BlockView } from './blockView'
+import { BBI, BigBedFeature } from './bbi'
 
 interface Loc {
   key: string
   offset: number
   length: number
-  field?: number
+  field: number
 }
+
 interface SearchOptions {
   signal?: AbortSignal
 }
+
 interface Index {
   type: number
   fieldcount: number
@@ -26,12 +28,10 @@ export function filterUndef<T>(ts: (T | undefined)[]): T[] {
 }
 
 export class BigBed extends BBI {
-  public readIndices: (abortSignal?: AbortSignal) => Promise<Index[]>
-
-  public constructor(opts: any) {
-    super(opts)
-    this.readIndices = this.headerCache.abortableMemoize(this._readIndices.bind(this))
-  }
+  protected indicesCache: AbortAwareCache<Index[]> = new AbortAwareCache()
+  public readIndices: (abortSignal?: AbortSignal) => Promise<Index[]> = this.indicesCache.abortableMemoize(
+    this._readIndices.bind(this),
+  )
 
   /*
    * retrieve unzoomed view for any scale
@@ -39,7 +39,7 @@ export class BigBed extends BBI {
    * @param abortSignal - an optional AbortSignal to kill operation
    * @return promise for a BlockView
    */
-  protected async getView(scale: number, abortSignal: AbortSignal): Promise<BlockView> {
+  protected async getView(scale: number, abortSignal: AbortSignal) {
     return this.getUnzoomedView(abortSignal)
   }
 
@@ -48,7 +48,7 @@ export class BigBed extends BBI {
    * @param abortSignal to abort operation
    * @return a Promise for an array of Index data structure since there can be multiple extraIndexes in a bigbed, see bedToBigBed documentation
    */
-  public async _readIndices(abortSignal?: AbortSignal): Promise<Index[]> {
+  public async _readIndices(abortSignal?: AbortSignal) {
     const { extHeaderOffset, isBigEndian } = await this.getHeader(abortSignal)
     const { buffer: data } = await this.bbi.read(Buffer.alloc(64), 0, 64, extHeaderOffset)
     const le = isBigEndian ? 'big' : 'little'
@@ -91,7 +91,7 @@ export class BigBed extends BBI {
    * @param opts - a SearchOptions argument with optional signal
    * @return a Promise for an array of bigbed block Loc entries
    */
-  private async searchExtraIndexBlocks(name: string, opts: SearchOptions = {}): Promise<Loc[]> {
+  private async searchExtraIndexBlocks(name: string, opts: SearchOptions = {}) {
     const { signal } = opts
     const { isBigEndian } = await this.getHeader(signal)
     const indices = await this.readIndices(signal)
@@ -172,25 +172,29 @@ export class BigBed extends BBI {
    * @param opts - a SearchOptions argument with optional signal
    * @return a Promise for an array of Feature
    */
-  public async searchExtraIndex(name: string, opts: SearchOptions = {}): Promise<Feature[]> {
+  public async searchExtraIndex(name: string, opts: SearchOptions = {}) {
     const blocks = await this.searchExtraIndexBlocks(name, opts)
     if (!blocks.length) return []
     const view = await this.getUnzoomedView()
     const res = blocks.map(block => {
-      return new Observable((observer: Observer<Feature[]>) => {
+      return new Observable((observer: Observer<unknown[]>) => {
         view.readFeatures(observer, [block], opts)
       }).pipe(
         reduce((acc, curr) => acc.concat(curr)),
-        map(x => {
-          for (let i = 0; i < x.length; i += 1) {
-             x[i].field = block.field // eslint-disable-line
-          }
-          return x
-        }),
+        map(
+          (x: unknown[]): BigBedFeature => {
+            for (let i = 0; i < x.length; i += 1) {
+              ;(x[i] as BigBedFeature).field = block.field
+            }
+            // @ts-ignore
+            return x as BigBedFeature[]
+          },
+        ),
       )
     })
-    const ret = await merge(...res).toPromise()
-    return ret.filter((f: any) => {
+    // @ts-ignore
+    const ret: BigBedFeature[] = await merge(...res).toPromise()
+    return ret.filter(f => {
       return f.rest.split('\t')[f.field - 3] === name
     })
   }

@@ -7,14 +7,24 @@ export class AbortError extends Error {
     this.code = 'ERR_ABORTED'
   }
 }
+
+export interface Block {
+  offset: number
+  length: number
+}
+export interface BlockGroup {
+  offset: number
+  length: number
+  blocks: Block[]
+}
 // sort blocks by file offset and
 // group blocks that are within 2KB of eachother
-export function groupBlocks(blocks: any[]): any[] {
+export function groupBlocks(blocks: Block[]): BlockGroup[] {
   blocks.sort((b0, b1) => (b0.offset | 0) - (b1.offset | 0))
 
   const blockGroups = []
   let lastBlock
-  let lastBlockEnd
+  let lastBlockEnd = 0
   for (let i = 0; i < blocks.length; i += 1) {
     if (lastBlock && blocks[i].offset - lastBlockEnd <= 2000) {
       lastBlock.length += blocks[i].length - lastBlockEnd + blocks[i].offset
@@ -49,7 +59,6 @@ export function checkAbortSignal(signal?: AbortSignal): void {
   if (!signal) return
 
   if (signal.aborted) {
-    // console.log('bam aborted!')
     if (typeof DOMException !== 'undefined') {
       throw new DOMException('aborted', 'AbortError')
     } else {
@@ -69,4 +78,44 @@ export function checkAbortSignal(signal?: AbortSignal): void {
 export async function abortBreakPoint(signal?: AbortSignal): Promise<void> {
   await Promise.resolve()
   checkAbortSignal(signal)
+}
+
+type AbortableCallback<T> = (signal: AbortSignal) => Promise<T>
+
+/* A class that provides memoization for abortable calls */
+export class AbortAwareCache<T> {
+  private cache: Map<AbortableCallback<T>, Promise<T>> = new Map()
+
+  /*
+   * Takes a function that has one argument, abortSignal, that returns a promise
+   * and it works by retrying the function if a previous attempt to initialize the parse cache was aborted
+   * @param fn - an AbortableCallback
+   * @return a memoized version of the AbortableCallback using the AbortAwareCache
+   */
+  public abortableMemoize(fn: (signal?: AbortSignal) => Promise<T>): (signal?: AbortSignal) => Promise<T> {
+    const { cache } = this
+    return function abortableMemoizeFn(signal?: AbortSignal) {
+      if (!cache.has(fn)) {
+        const fnReturn = fn(signal)
+        cache.set(fn, fnReturn)
+        if (signal) {
+          fnReturn.catch((): void => {
+            if (signal.aborted) cache.delete(fn)
+          })
+        }
+      }
+      const ret = cache.get(fn)
+      if (!ret) {
+        throw new Error('abortable memoization function not found')
+      }
+      return ret.catch(
+        (e: AbortError | DOMException): Promise<T> => {
+          if (e.code === 'ERR_ABORTED' || e.name === 'AbortError') {
+            return fn(signal)
+          }
+          throw e
+        },
+      )
+    }
+  }
 }

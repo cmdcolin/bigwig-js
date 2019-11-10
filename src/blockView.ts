@@ -2,12 +2,12 @@
 import { Observer } from 'rxjs'
 import { Parser } from '@gmod/binary-parser'
 import AbortablePromiseCache from 'abortable-promise-cache'
-import { GenericFilehandle } from 'generic-filehandle'
 import zlib from 'zlib'
 import QuickLRU from 'quick-lru'
-import { Feature } from './bbi'
+import { Feature, BigBedFeature, SummaryFeature } from './bbi'
 import Range from './range'
-import { groupBlocks, checkAbortSignal } from './util'
+import { groupBlocks, checkAbortSignal, Block, BlockGroup } from './util'
+import { GenericFilehandle } from 'generic-filehandle'
 
 interface CoordRequest {
   chrId: number
@@ -49,20 +49,15 @@ const BIG_WIG_TYPE_GRAPH = 1
 const BIG_WIG_TYPE_VSTEP = 2
 const BIG_WIG_TYPE_FSTEP = 3
 
-function getParsers(isBigEndian: boolean): any {
-  const le = isBigEndian ? 'big' : 'little'
-  const summaryParser = new Parser()
-    .endianess(le)
-    .uint32('chromId')
-    .uint32('start')
-    .uint32('end')
-    .uint32('validCnt')
-    .float('minScore')
-    .float('maxScore')
-    .float('sumData')
-    .float('sumSqData')
-
-  const leafParser = new Parser()
+/**
+ * View into a subset of the data in a BigWig file.
+ *
+ * Adapted by Robert Buels and Colin Diesh from bigwig.js in the Dalliance Genome
+ * Explorer by Thomas Down.
+ * @constructs
+ */
+const initLeafParser = (le: string) =>
+  new Parser()
     .endianess(le)
     .uint8('isLeaf')
     .skip(1)
@@ -91,16 +86,9 @@ function getParsers(isBigEndian: boolean): any {
         }),
       },
     })
-  const bigBedParser = new Parser()
-    .endianess(le)
-    .uint32('chromId')
-    .int32('start')
-    .int32('end')
-    .string('rest', {
-      zeroTerminated: true,
-    })
 
-  const bigWigParser = new Parser()
+const initBigWigParser = (le: string) =>
+  new Parser()
     .endianess(le)
     .skip(4)
     .int32('blockStart')
@@ -130,22 +118,31 @@ function getParsers(isBigEndian: boolean): any {
         }),
       },
     })
-  return {
-    bigWigParser,
-    bigBedParser,
-    summaryParser,
-    leafParser,
-  }
-}
-
-/**
- * View into a subset of the data in a BigWig file.
- *
- * Adapted by Robert Buels and Colin Diesh from bigwig.js in the Dalliance Genome
- * Explorer by Thomas Down.
- * @constructs
- */
-
+const initBigBedParser = (le: string) =>
+  new Parser().endianess(le).array('items', {
+    readUntil: 'eof',
+    type: new Parser()
+      .uint32('chromId')
+      .int32('start')
+      .int32('end')
+      .string('rest', {
+        zeroTerminated: true,
+      }),
+  })
+const initSummaryParser = (le: string) =>
+  new Parser().endianess(le).array('items', {
+    readUntil: 'eof',
+    type: new Parser()
+      .endianess(le)
+      .uint32('chromId')
+      .uint32('start')
+      .uint32('end')
+      .uint32('validCnt')
+      .float('minScore')
+      .float('maxScore')
+      .float('sumData')
+      .float('sumSqData'),
+  })
 export class BlockView {
   private cirTreeOffset: number
 
@@ -157,25 +154,24 @@ export class BlockView {
 
   private isBigEndian: boolean
 
-  private refsByName: any
+  private refsByName: { [key: string]: number }
 
   private blockType: string
 
+  private cirTreeBuffer: Buffer
+
   private cirTreePromise?: Promise<{ bytesRead: number; buffer: Buffer }>
 
-  private featureCache: any
+  private featureCache: typeof AbortablePromiseCache
 
-  private leafParser: any
-
-  private bigWigParser: any
-
-  private bigBedParser: any
-
-  private summaryParser: any
+  private leafParser: ReturnType<typeof initLeafParser>
+  private bigWigParser: ReturnType<typeof initBigWigParser>
+  private bigBedParser: ReturnType<typeof initBigBedParser>
+  private summaryParser: ReturnType<typeof initSummaryParser>
 
   public constructor(
-    bbi: any,
-    refsByName: any,
+    bbi: GenericFilehandle,
+    refsByName: { [key: string]: number },
     cirTreeOffset: number,
     cirTreeLength: number,
     isBigEndian: boolean,
@@ -192,8 +188,8 @@ export class BlockView {
     this.isBigEndian = isBigEndian
     this.bbi = bbi
     this.blockType = blockType
-    Object.assign(this, getParsers(isBigEndian))
-
+    this.cirTreeBuffer = Buffer.alloc(48)
+    this.initializeParsers(isBigEndian)
     this.featureCache = new AbortablePromiseCache({
       cache: new QuickLRU({ maxSize: 1000 }),
 
@@ -204,14 +200,15 @@ export class BlockView {
       },
     })
   }
+  private initializeParsers(isBigEndian: boolean) {
+    const le = isBigEndian ? 'big' : 'little'
+    this.leafParser = initLeafParser(le)
+    this.summaryParser = initSummaryParser(le)
+    this.bigWigParser = initBigWigParser(le)
+    this.bigBedParser = initBigBedParser(le)
+  }
 
-  public async readWigData(
-    chrName: string,
-    start: number,
-    end: number,
-    observer: Observer<Feature[]>,
-    opts: Options,
-  ): Promise<void> {
+  public async readWigData(chrName: string, start: number, end: number, observer: Observer<unknown[]>, opts: Options) {
     try {
       const { refsByName, bbi, cirTreeOffset, isBigEndian } = this
       const { signal } = opts
@@ -221,21 +218,22 @@ export class BlockView {
       }
       const request = { chrId, start, end }
       if (!this.cirTreePromise) {
-        this.cirTreePromise = bbi.read(Buffer.alloc(48), 0, 48, cirTreeOffset, { signal })
+        this.cirTreePromise = bbi.read(this.cirTreeBuffer, 0, 48, cirTreeOffset, { signal })
       }
-      const { buffer } = await this.cirTreePromise
+      await this.cirTreePromise
+      const buffer = this.cirTreeBuffer
       const cirBlockSize = isBigEndian ? buffer.readUInt32BE(4) : buffer.readUInt32LE(4)
-      let blocksToFetch: any[] = []
+      let blocksToFetch: Block[] = []
       let outstanding = 0
 
       //eslint-disable-next-line prefer-const
       let cirFobRecur2: Function
 
-      const filterFeats = (b: DataBlock): boolean =>
+      const filterFeats = (b: DataBlock) =>
         (b.startChrom < chrId || (b.startChrom === chrId && b.startBase <= end)) &&
         (b.endChrom > chrId || (b.endChrom === chrId && b.endBase >= start))
 
-      const cirFobStartFetch = async (off: any, fr: any, level: number): Promise<void> => {
+      const cirFobStartFetch = async (off: number[], fr: Range, level: number) => {
         try {
           const length = fr.max() - fr.min()
           const offset = fr.min()
@@ -253,7 +251,7 @@ export class BlockView {
           observer.error(e)
         }
       }
-      const cirFobRecur = (offset: any, level: number): void => {
+      const cirFobRecur = (offset: number[], level: number) => {
         try {
           outstanding += offset.length
 
@@ -276,13 +274,11 @@ export class BlockView {
           const p = this.leafParser.parse(data).result
           if (p.blocksToFetch) {
             blocksToFetch = blocksToFetch.concat(
-              p.blocksToFetch
-                .filter(filterFeats)
-                .map((l: any): any => ({ offset: l.blockOffset, length: l.blockSize })),
+              p.blocksToFetch.filter(filterFeats).map((l: any) => ({ offset: l.blockOffset, length: l.blockSize })),
             )
           }
           if (p.recurOffsets) {
-            const recurOffsets = p.recurOffsets.filter(filterFeats).map((l: any): any => l.blockOffset)
+            const recurOffsets = p.recurOffsets.filter(filterFeats).map((l: any) => l.blockOffset)
             if (recurOffsets.length > 0) {
               cirFobRecur(recurOffsets, level + 1)
             }
@@ -298,40 +294,44 @@ export class BlockView {
     }
   }
 
-  private parseSummaryBlock(data: Buffer, startOffset: number, request?: CoordRequest): Feature[] {
-    const features = []
-    let currOffset = startOffset
-    while (currOffset < data.byteLength) {
-      const res = this.summaryParser.parse(data.slice(currOffset))
-      features.push(res.result)
-      currOffset += res.offset
-    }
-    let items = features
-    if (request) items = items.filter((elt: SummaryBlock): boolean => elt.chromId === request.chrId)
-    items = items.map(
-      (elt: SummaryBlock): Feature => ({
-        start: elt.start,
-        end: elt.end,
-        maxScore: elt.maxScore,
-        minScore: elt.minScore,
-        score: elt.sumData / (elt.validCnt || 1),
+  private parseSummaryBlock(data: Buffer, startOffset: number, request?: CoordRequest): SummaryFeature[] {
+    const currOffset = startOffset
+    const res = this.summaryParser.parse(data.slice(currOffset)).result
+    const items = res.items.map(
+      ({
+        sumData,
+        validCnt = 1,
+        start,
+        end,
+        maxScore,
+        minScore,
+      }: {
+        sumData: number
+        validCnt: number
+        start: number
+        end: number
+        maxScore: number
+        minScore: number
+      }): SummaryFeature => ({
+        start,
+        end,
+        maxScore,
+        minScore,
+        score: sumData / validCnt,
         summary: true,
       }),
     )
-    return request ? items.filter(f => BlockView.coordFilter(f, request)) : items
+    return request ? items.filter((f: any) => BlockView.coordFilter(f, request)) : items
   }
 
-  private parseBigBedBlock(data: Buffer, startOffset: number, offset: number, request?: CoordRequest): Feature[] {
-    const items = []
-    let currOffset = startOffset
-    while (currOffset < data.byteLength) {
-      const res = this.bigBedParser.parse(data.slice(currOffset))
-      res.result.uniqueId = `bb-${offset + currOffset}`
-      items.push(res.result)
-      currOffset += res.offset
-    }
+  private parseBigBedBlock(data: Buffer, startOffset: number, request?: CoordRequest): BigBedFeature[] {
+    const currOffset = startOffset
+    const res = this.bigBedParser.parse(data.slice(currOffset)).result
+    res.items.forEach((r: any, i: number) => {
+      r.uniqueId = `bb-${startOffset}-${i}`
+    })
 
-    return request ? items.filter((f: any) => BlockView.coordFilter(f, request)) : items
+    return request ? res.items.filter((f: any) => BlockView.coordFilter<BigBedFeature>(f, request)) : res.items
   }
 
   private parseBigWigBlock(bytes: Buffer, startOffset: number, request?: CoordRequest): Feature[] {
@@ -351,22 +351,22 @@ export class BlockView {
     return request ? items.filter((f: any) => BlockView.coordFilter(f, request)) : items
   }
 
-  private static coordFilter(f: Feature, range: CoordRequest): boolean {
+  private static coordFilter<K extends Feature>(f: K, range: CoordRequest): boolean {
     return f.start < range.end && f.end >= range.start
   }
 
-  public async readFeatures(observer: Observer<Feature[]>, blocks: any, opts: Options = {}): Promise<void> {
+  public async readFeatures(observer: Observer<unknown[]>, blocks: Block[], opts: Options = {}) {
     try {
       const { blockType, isCompressed } = this
       const { signal, request } = opts
       const blockGroupsToFetch = groupBlocks(blocks)
       checkAbortSignal(signal)
       await Promise.all(
-        blockGroupsToFetch.map(async (blockGroup: any) => {
+        blockGroupsToFetch.map(async (blockGroup: BlockGroup) => {
           checkAbortSignal(signal)
           const { length, offset } = blockGroup
           const data = await this.featureCache.get(`${length}_${offset}`, blockGroup, signal)
-          blockGroup.blocks.forEach((block: any) => {
+          blockGroup.blocks.forEach((block: Block) => {
             checkAbortSignal(signal)
             let blockOffset = block.offset - blockGroup.offset
             let resultData = data
@@ -384,8 +384,7 @@ export class BlockView {
                 observer.next(this.parseBigWigBlock(resultData, blockOffset, request))
                 break
               case 'bigbed':
-                // eslint-disable-next-line no-bitwise
-                observer.next(this.parseBigBedBlock(resultData, blockOffset, block.offset * (1 << 8), request))
+                observer.next(this.parseBigBedBlock(resultData, blockOffset, request))
                 break
               default:
                 console.warn(`Don't know what to do with ${blockType}`)
